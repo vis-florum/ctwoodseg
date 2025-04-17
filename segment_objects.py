@@ -8,12 +8,6 @@ import re
 from collections import defaultdict
 import matplotlib.pyplot as plt
 
-# logging.basicConfig(
-#     level=logging.DEBUG,
-#     format='%(levelname)s: %(message)s',
-#     handlers=[logging.StreamHandler()]
-# )
-
 def setup_logging(log_dir, base_name="extract_pipeline"):
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
@@ -50,7 +44,6 @@ def findInterMode(img_dip, rho_min, rho_max):
     '''Find the minimum between two modes of the image histogram'''
     logging.debug("Finding inter modes...")
 
-    # mask = (img >= rho_min) & (img <= rho_max)
     # Sample in the middle of the image
     img_dip_slice = img_dip[img_dip.Size(0)//2,:,:].Squeeze()
     mask = dip.RangeThreshold(img_dip_slice, lowerBound=rho_min, upperBound=rho_max)
@@ -129,10 +122,10 @@ def extract_and_save_components(label_img, original_img, output_dir, header, lab
         # Skip if size does not meet requirements
         size_hint_dip = size_hint_px[::-1]
         if any(extent[d] < size_hint_dip[d] for d in range(3)):
-            logging.info(f"Skipping label {k} due to size: {extent}")
+            logging.info(f"Skipping label {k} due to size: {extent[::-1]}  (X, Y, Z)")
             continue
         if extent[1] > size_hint_dip[1] * 4 or extent[2] > size_hint_dip[2] * 4:
-            logging.info(f"Skipping label {k} due to size: {extent}")
+            logging.info(f"Skipping label {k} due to size: {extent[::-1]} (X, Y, Z)")
             continue
 
         valid_labels.append(k)
@@ -175,33 +168,6 @@ def extract_and_save_components(label_img, original_img, output_dir, header, lab
         lower = label_positions[k]["lower"]
         upper = label_positions[k]["upper"]
         extent = label_positions[k]["extent"]
-    # for i, k in enumerate(label_order, start=1):  # k is label index
-    #     lower = []
-    #     upper = []
-    #     extent = []  # without margins
-        
-        # for d in range(3):  # 0 = X, 1 = Y, 2 = Z
-        #     min_d = int(mins[k][d])
-        #     max_d = int(maxs[k][d])
-        #     ext_d = max_d - min_d
-
-        #     extent.append(ext_d)
-
-        #     lo = max(0, min_d - margin_px)
-        #     hi = min(max_size[d] - 1, max_d + margin_px + 1)  # +1 for slice exclusivity
-
-        #     lower.append(lo)
-        #     upper.append(hi)
-
-        # # Use size hint:
-        # size_hint_dip = size_hint_px[::-1]
-        # if any(extent[d] < size_hint_dip[d] for d in range(3)):
-        #     logging.info(f"Skipping object {i} (label {k}) due to size: {extent}")
-        #     continue
-        # # X and Y too large:
-        # if extent[1] > size_hint_dip[1]*4 or extent[2] > size_hint_dip[2]*4:
-        #     logging.info(f"Skipping object {i} (label {k}) due to size: {extent}")
-        #     continue
 
         # Original: lower = [x, y, z]
         slices = [
@@ -219,7 +185,6 @@ def extract_and_save_components(label_img, original_img, output_dir, header, lab
         else:
             out_path = os.path.join(output_dir, labels_pic[i-1] + ".nrrd")
         
-
         cropped_header = header.copy()
         cropped_header['sizes'] = np.array(cropped.Sizes())
         # cropped_header["encoding"] = "raw"
@@ -234,9 +199,29 @@ def main():
     margin_mm = 10  # mm
     filenames = []
     image_orders = []
+
+    # nrrd_base = "/media/johhub/Speicher1/CT-Data/Madeira"
+    # size_hint_mm = [100,100,900]
+    # filename = "20211013.163715.Madeira_pole3.nrrd"
+    # image_order = ["Pole_3"]
+    # filenames.append(filename)
+    # image_orders.append(image_order)
     
-    # nrrd_base = "Linn-exjobb"
-    # size_hint_mm = 
+    
+    # nrrd_base = "Linn"
+
+    # size_hint_mm = [25,43,900]
+    # filename = "Linn-exjobb_1.nrrd"
+    # image_order = ["1_Foder_H", "6_Taklist" ,"2_Ribb"]
+    # filenames.append(filename)
+    # image_orders.append(image_order)
+
+    # size_hint_mm = [22,86,550]
+    # filename = "Linn-Exjobb_2.nrrd"
+    # image_order = ["5_Fasad_Planka", "3_Foder_V" ,"1_Trappracke"]
+    # filenames.append(filename)
+    # image_orders.append(image_order)
+
 
 
     ###
@@ -246,68 +231,76 @@ def main():
     # filename = "20250304.121842.A47_A46.nrrd"
     # image_order = [int(num) for num in re.findall(r'\d+', filename.split(".")[2])]
 
+    # all nrrd files in RAW/A
+    # nrrds = os.listdir(nrrd_base)
+    # nrrds = [f for f in nrrds if f.endswith('.nrrd')]
+    # for nrrd_file in nrrds:
+    #     image_order = [int(num) for num in re.findall(r'\d+', nrrd_file.split(".")[2])]
+    #     filenames.append(nrrd_file)
+    #     image_orders.append(image_order)
+
 
     ###
-    nrrd_base="RAW/B"
-    size_hint_mm=[40,40,400] # mm
+    # nrrd_base="RAW/B"
+    # size_hint_mm=[40,40,400] # mm
     
     # filename = "20250225.153927.B1-10.nrrd"
     # image_order = [1,6,8,5,2,3,4,7,9,10]
 
-    filename = "20250226.084612.B11-20.nrrd"
-    image_order = range(11,21)
-    filenames.append(filename)
-    image_orders.append(image_order)
+    # filename = "20250226.084612.B11-20.nrrd"
+    # image_order = range(11,21)
+    # filenames.append(filename)
+    # image_orders.append(image_order)
     
-    filename = "20250226.174754.B21-30.nrrd"
-    image_order = [22,23,24,25,21,26,27,28,29,30]
-    filenames.append(filename)
-    image_orders.append(image_order)
+    # filename = "20250226.174754.B21-30.nrrd"
+    # image_order = [22,23,24,25,21,26,27,28,29,30]
+    # filenames.append(filename)
+    # image_orders.append(image_order)
     
-    filename = "20250227.081318.B31-40.nrrd"
-    image_order = range(31,41)
-    filenames.append(filename)
-    image_orders.append(image_order)
+    # filename = "20250227.081318.B31-40.nrrd"
+    # image_order = range(31,41)
+    # filenames.append(filename)
+    # image_orders.append(image_order)
     
-    filename = "20250227.083550.B41-50.nrrd"
-    image_order = [41,43,44,45,42,46,47,48,49,50]
-    filenames.append(filename)
-    image_orders.append(image_order)
+    # filename = "20250227.083550.B41-50.nrrd"
+    # image_order = [41,43,44,45,42,46,47,48,49,50]
+    # filenames.append(filename)
+    # image_orders.append(image_order)
     
-    filename = "20250227.090004.B51-60.nrrd"
-    image_order = range(51,61)
-    filenames.append(filename)
-    image_orders.append(image_order)
+    # filename = "20250227.090004.B51-60.nrrd"
+    # image_order = range(51,61)
+    # filenames.append(filename)
+    # image_orders.append(image_order)
     
-    filename = "20250227.095042.B61-70.nrrd"
-    image_order = [62,63,64,68,61,65,66,67,69,70]
-    filenames.append(filename)
-    image_orders.append(image_order)
+    # filename = "20250227.095042.B61-70.nrrd"
+    # image_order = [62,63,64,68,61,65,66,67,69,70]
+    # filenames.append(filename)
+    # image_orders.append(image_order)
     
-    filename = "20250227.101115.B71-80.nrrd"
-    image_order = [72,73,76,78,71,74,75,77,79,80]
-    filenames.append(filename)
-    image_orders.append(image_order)
+    # filename = "20250227.101115.B71-80.nrrd"
+    # image_order = [72,73,76,78,71,74,75,77,79,80]
+    # filenames.append(filename)
+    # image_orders.append(image_order)
     
-    filename = "20250227.102943.B81-90.nrrd"
-    image_order = range(81,91)
-    filenames.append(filename)
-    image_orders.append(image_order)
+    # filename = "20250227.102943.B81-90.nrrd"
+    # image_order = range(81,91)
+    # filenames.append(filename)
+    # image_orders.append(image_order)
     
-    filename = "20250227.104940.B91-100.nrrd"
-    image_order = range(91,101)
-    filenames.append(filename)
-    image_orders.append(image_order)
+    # filename = "20250227.104940.B91-100.nrrd"
+    # image_order = range(91,101)
+    # filenames.append(filename)
+    # image_orders.append(image_order)
     
-    filename = "20250227.111209.B101-110.nrrd"
-    image_order = range(101,111)
-    filenames.append(filename)
-    image_orders.append(image_order)
+    # filename = "20250227.111209.B101-110.nrrd"
+    # image_order = range(101,111)
+    # filenames.append(filename)
+    # image_orders.append(image_order)
     
-    filename = "20250227.114125.B111-112.nrrd"
-    image_order = [111,112]
-    filenames.append(filename)
-    image_orders.append(image_order)
+    # filename = "20250227.114125.B111-112.nrrd"
+    # image_order = [111,112]
+    # filenames.append(filename)
+    # image_orders.append(image_order)
     
 
     ###
