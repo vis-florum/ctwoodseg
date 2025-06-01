@@ -83,12 +83,20 @@ def segment_objects(img_dip, px_scale, rho_min=100, rho_max=500):
 
 
 
-def extract_and_save_components(label_img, original_img, output_dir, header, labels_pic=None, margin_mm=5, size_hint_mm=[1,1,1]):
+def extract_and_save_components(label_img, original_img, output_dir, header, labels_pic=None, margin_mm=5, size_hint_mm_inf=None, size_hint_mm_sup=None):
     os.makedirs(output_dir, exist_ok=True)
 
     dx, dy, dz = header["spacings"]
     margin_px = int(margin_mm // dx)
-    size_hint_px = [int(size_hint_mm[d] // dx) for d in range(3)]
+    if size_hint_mm_inf is None:
+        size_hint_px_inf = [1, 1, 1]
+    else:
+        size_hint_px_inf = [int(size_hint_mm_inf[d] // dx) for d in range(3)]
+    if size_hint_mm_sup is None:
+        size_hint_px_sup = [original_img.Size(d) for d in range(3)]
+    else:
+        size_hint_px_sup = [int(size_hint_mm_sup[d] // dx) for d in range(3)]
+    
     max_size = original_img.Sizes()
 
     # Fet Bounding boxes for all objects at once:
@@ -120,14 +128,18 @@ def extract_and_save_components(label_img, original_img, output_dir, header, lab
             upper.append(hi)
 
         # Skip if size does not meet requirements
-        size_hint_dip = size_hint_px[::-1]
-        if any(extent[d] < size_hint_dip[d] for d in range(3)):
-            logging.info(f"Skipping label {k} due to size: {extent[::-1]}  (X, Y, Z)")
+        size_hint_dip_inf = size_hint_px_inf[::-1]
+        size_hint_dip_sup = size_hint_px_sup[::-1]
+        if any(extent[d] < size_hint_dip_inf[d] for d in range(3)):
+            logging.info(f"Skipping label {k} due to undersize: {extent[::-1]}  (X, Y, Z)")
             continue
-        if extent[1] > size_hint_dip[1] * 4 or extent[2] > size_hint_dip[2] * 4:
-            logging.info(f"Skipping label {k} due to size: {extent[::-1]} (X, Y, Z)")
+        # if extent[1] > size_hint_dip[1] * 4 or extent[2] > size_hint_dip[2] * 4:
+        #     logging.info(f"Skipping label {k} due to size: {extent[::-1]} (X, Y, Z)")
+        #     continue
+        if any(extent[d] > size_hint_dip_sup[d] for d in range(3)):
+            logging.info(f"Skipping label {k} due to oversize: {extent[::-1]} (X, Y, Z)")
             continue
-
+        
         valid_labels.append(k)
         label_positions[k] = {
             "extent": extent,
@@ -139,8 +151,9 @@ def extract_and_save_components(label_img, original_img, output_dir, header, lab
         }
 
     # Step 1: bin labels into rows by X
-    row_tolerance_mm = size_hint_mm[0]
-    row_tolerance_px = int(row_tolerance_mm // dx)
+    # row_tolerance_mm = (size_hint_mm_inf[0] + size_hint_mm_sup[0]) / 2
+    # row_tolerance_px = int(row_tolerance_mm // dx)
+    row_tolerance_px = (size_hint_px_inf[0] + size_hint_px_sup[0]) / 2
     rows_dict = defaultdict(list)
 
     # Grouping by row bin (rounded X / tolerance)
@@ -190,7 +203,7 @@ def extract_and_save_components(label_img, original_img, output_dir, header, lab
         # cropped_header["encoding"] = "raw"
         #
         logging.info(f"Saving {out_path}...")
-        nrrd.write(out_path, np.asarray(cropped), header=cropped_header, compression_level=2)
+        nrrd.write(out_path, np.asarray(cropped), header=cropped_header, compression_level=1)
         logging.info(f"Saved: {out_path}")    
 
 
@@ -199,6 +212,20 @@ def main():
     margin_mm = 10  # mm
     filenames = []
     image_orders = []
+    raw_project = False
+    
+    nrrd_base = "./Jan-NDT-CT/Spruce"
+    filename = "Jan_Msc_Spruce.nrrd"
+    prefix = "S"
+    size_nom = 20
+    size_hint_mm_inf = None#[15,15,70]
+    size_hint_mm_sup = None#[25,25,90]
+
+    # Naming convention: S1-{size_nom}, S2-{size_nom}, ...
+    image_order = [f"{prefix}{i:01d}-{str(size_nom)}" for i in range(1, 9)]
+    
+    filenames.append(filename)
+    image_orders.append(image_order)
 
     # nrrd_base = "/media/johhub/Speicher1/CT-Data/Madeira"
     # size_hint_mm = [100,100,900]
@@ -408,19 +435,27 @@ def main():
         filename = filenames[i]
         image_order = image_orders[i]
 
-        scan_name = filename.split(".")[2]
-        batch_name = scan_name[0]
-        nrrd_file = os.path.join(nrrd_base, filename)
-        output_dir = os.path.join(nrrd_base, scan_name)
-        labels_pic = [f"{batch_name}{num}" for num in image_order]
-        setup_logging(nrrd_base,base_name=scan_name)
+        # RAW specific:
+        if raw_project:
+            scan_name = filename.split(".")[2]
+            batch_name = scan_name[0]
+            nrrd_file = os.path.join(nrrd_base, filename)
+            output_dir = os.path.join(nrrd_base, scan_name)
+            labels_pic = [f"{batch_name}{num}" for num in image_order]
+            setup_logging(nrrd_base,base_name=scan_name)
+        else:
+            scan_name = os.path.split(filename)[-1].split(".")[0]
+            nrrd_file = os.path.join(nrrd_base, filename)
+            output_dir = nrrd_base
+            labels_pic = image_order
+            setup_logging(nrrd_base,base_name=scan_name)
 
         # Pipeline
         logging.info(f"Loading {nrrd_file}...")
         img_dip, header = load_nrrd_as_dip(nrrd_file)
         dx, dy, dz = header["spacings"]
         label_img = segment_objects(img_dip, dx)
-        extract_and_save_components(label_img, img_dip, output_dir, header, labels_pic=labels_pic, margin_mm=margin_mm, size_hint_mm=size_hint_mm)
+        extract_and_save_components(label_img, img_dip, output_dir, header, labels_pic=labels_pic, margin_mm=margin_mm, size_hint_mm_inf=size_hint_mm_inf, size_hint_mm_sup=size_hint_mm_sup)
     
 
 
