@@ -3,11 +3,14 @@ import diplib as dip
 import numpy as np
 from sklearn.cluster import DBSCAN
 import os
+import re
+from pathlib import Path
 import logging
 from datetime import datetime
 import re
 from collections import defaultdict
 import matplotlib.pyplot as plt
+from multiprocessing import Pool, cpu_count
 
 
 def setup_logging(log_dir, base_name="extract_pipeline"):
@@ -67,11 +70,13 @@ def findInterMode(img_dip, rho_min, rho_max):
 
 
 def segment_objects(img_dip, px_scale, rho_min=100, rho_max=500):
-    t = findInterMode(img_dip, rho_min, rho_max)
+    # t = findInterMode(img_dip, rho_min, rho_max)
+    t = 200
     logging.info(f"Intermode threshold: {t:.2f}")
 
     mask = dip.FixedThreshold(img_dip, t)
-    se_diameter = 1.5 / px_scale
+    # se_diameter = 1.5 / px_scale
+    se_diameter = 3 / px_scale
 
     # Morphological closing to reconnect fragments
     # mask = dip.Closing(mask, dip.SE(se_diameter))  # use spherical SE
@@ -215,165 +220,165 @@ def extract_and_save_components(label_img, img_dip, output_dir, header, labels_p
             "mid_z": (mins[k][0] + maxs[k][0]) / 2 
         }
 
-    
-    # Binning / Clustering of the objects
-    logging.info(f"Clustering {len(valid_labels)} objects...")
-    postol_px = [int(postol_mm[d] // dx) for d in range(3)]
-    final_label_order = cluster_and_sort_labels(label_positions, valid_labels, postol_px)
-    
-    # Save label order as CSV
-    label_order_path = os.path.join(output_dir, "label_order.csv")
-    with open(label_order_path, "w") as f:
-        f.write("Label, X_start, Y_start, Z_start\n")
-        for k in final_label_order:
+    if len(valid_labels) > 0:
+        # Binning / Clustering of the objects
+        logging.info(f"Clustering {len(valid_labels)} objects...")
+        postol_px = [int(postol_mm[d] // dx) for d in range(3)]
+        final_label_order = cluster_and_sort_labels(label_positions, valid_labels, postol_px)
+        
+        # Save label order as CSV
+        label_order_path = os.path.join(output_dir, "label_order.csv")
+        with open(label_order_path, "w") as f:
+            f.write("Label, X_start, Y_start, Z_start\n")
+            for k in final_label_order:
+                lower = label_positions[k]["lower"]
+                upper = label_positions[k]["upper"]
+                extent = label_positions[k]["extent"]
+                f.write(f"{k}, {lower[2]}, {lower[1]}, {lower[0]}\n")
+
+
+        # Crop and save the objects in right order with right names
+        for i, k in enumerate(final_label_order, start=1): # k is label index
             lower = label_positions[k]["lower"]
             upper = label_positions[k]["upper"]
             extent = label_positions[k]["extent"]
-            f.write(f"{k}, {lower[2]}, {lower[1]}, {lower[0]}\n")
+
+            # Original: lower = [x, y, z]
+            slices = [
+                slice(lower[0], upper[0]),  # Z
+                slice(lower[1], upper[1]),  # Y
+                slice(lower[2], upper[2])   # X
+            ]
+            # cropped = img_dip[slices]
+            cropped = img_dip.At(slices)
+
+            # Save using NRRD
+            z0, y0, x0 = lower
+            extent_x, extent_y, extent_z = extent[::-1]  # [X, Y, Z]
+            if labels_pic is None:
+                out_path = os.path.join(
+                    output_dir,
+                    f"object_{i:02d}_X{x0}_Y{y0}_Z{z0}.nrrd"
+                )
+            elif i-1 < len(labels_pic):
+                out_path = os.path.join(
+                    output_dir,
+                    labels_pic[i-1] + ".nrrd"
+                )
+            else:
+                out_path = os.path.join(
+                    output_dir,
+                    f"unknown-{i-len(labels_pic):02d}_X{x0}_Y{y0}_Z{z0}_extX{extent_x}_extY{extent_y}_extZ{extent_z}.nrrd"
+                )
+
+            cropped_header = header.copy()
+            cropped_header['sizes'] = np.array(cropped.Sizes())
+            # cropped_header["encoding"] = "raw"
+            #
+            logging.info(f"Saving {out_path}...")
+            nrrd.write(out_path, np.asarray(cropped), header=cropped_header, compression_level=1)
+            logging.info(f"Saved: {out_path}")
+    else:
+        logging.warning((f"No valid labels found!"))
 
 
-    # Crop and save the objects in right order with right names
-    for i, k in enumerate(final_label_order, start=1): # k is label index
-        lower = label_positions[k]["lower"]
-        upper = label_positions[k]["upper"]
-        extent = label_positions[k]["extent"]
+###############################################################################################
 
-        # Original: lower = [x, y, z]
-        slices = [
-            slice(lower[0], upper[0]),  # Z
-            slice(lower[1], upper[1]),  # Y
-            slice(lower[2], upper[2])   # X
-        ]
-        # cropped = img_dip[slices]
-        cropped = img_dip.At(slices)
-
-        # Save using NRRD
-        z0, y0, x0 = lower
-        extent_x, extent_y, extent_z = extent[::-1]  # [X, Y, Z]
-        if labels_pic is None:
-            out_path = os.path.join(
-                output_dir,
-                f"object_{i:02d}_X{x0}_Y{y0}_Z{z0}.nrrd"
-            )
-        elif i-1 < len(labels_pic):
-            out_path = os.path.join(
-                output_dir,
-                labels_pic[i-1] + ".nrrd"
-            )
-        else:
-            out_path = os.path.join(
-                output_dir,
-                f"unknown-{i-len(labels_pic):02d}_X{x0}_Y{y0}_Z{z0}_extX{extent_x}_extY{extent_y}_extZ{extent_z}.nrrd"
-            )
-
-        cropped_header = header.copy()
-        cropped_header['sizes'] = np.array(cropped.Sizes())
-        # cropped_header["encoding"] = "raw"
-        #
-        logging.info(f"Saving {out_path}...")
-        nrrd.write(out_path, np.asarray(cropped), header=cropped_header, compression_level=1)
-        logging.info(f"Saved: {out_path}")    
-
-
-def main():
+def process_general():
     # Input
     margin_mm = 10  # mm
     filenames = []
     image_orders = []
-    raw_project = False
-    
-    size_hint_mm_inf = None
+    size_hint_mm_inf = [1500,90,90] # Z, Y, X
     size_hint_mm_sup = None
-    postol_mm = [100,100,15]
+    postol_mm = [100,100,100]
     
-    nrrd_base = "./Jan-NDT-CT/Spruce"
-    filename = "Jan_Msc_Spruce.nrrd"
-    prefix = "S"
+    nrrd_base = ""
     
-    nrrd_base = "./Jan-NDT-CT/Oak"
-    filename = "Jan_Msc_Oak.nrrd"
-    prefix = "O"
+    # size_hint_mm_inf = None
+    # size_hint_mm_sup = None
+    # postol_mm = [100,100,15]
     
-    nrrd_base = "./Jan-NDT-CT/Beech"
-    filename = "Jan_Msc_Beech.nrrd"
-    prefix = "B"
+    # nrrd_base = "./Jan-NDT-CT/Spruce"
+    # filename = "Jan_Msc_Spruce.nrrd"
+    # prefix = "S"
+    
+    # nrrd_base = "./Jan-NDT-CT/Oak"
+    # filename = "Jan_Msc_Oak.nrrd"
+    # prefix = "O"
+    
+    # nrrd_base = "./Jan-NDT-CT/Beech"
+    # filename = "Jan_Msc_Beech.nrrd"
+    # prefix = "B"
 
-    # Naming convention: S1-{size_nom}, S2-{size_nom}, ...
-    image_order = []
-    for size_nom in [50, 40, 30, 20]:
-        names = [f"{prefix}{i:01d}-{str(size_nom)}" for i in range(1, 9)]
-        image_order.extend(names)
-    image_order.append("water")
+    # # Naming convention: S1-{size_nom}, S2-{size_nom}, ...
+    # image_order = []
+    # for size_nom in [50, 40, 30, 20]:
+    #     names = [f"{prefix}{i:01d}-{str(size_nom)}" for i in range(1, 9)]
+    #     image_order.extend(names)
+    # image_order.append("water")
     
     
-    # Blackoak
-    nrrd_base = "./Jan-NDT-CT/Blackoak"
-    filename = "Jan_Msc_Blackoak.nrrd"
+    # # Blackoak
+    # nrrd_base = "./Jan-NDT-CT/Blackoak"
+    # filename = "Jan_Msc_Blackoak.nrrd"
     
-    image_order = ["BO1-50", "BO1-40", "BO1-30", "BO1-20", "water"]
-    
-    
-    # EXTRA
-    nrrd_base = "./Jan-NDT-CT/Extra"
-    filename = "Jan_Msc_Extra.nrrd"
-    
-    image_order = ["SE1-50", "SE2-50", "SE1-40", "SE2-40", "OE1-40", "SE1-30", "SE2-30", "OE1-30", "OE1-50", "OE2-50"]
-    names = [f"BE{i:01d}-20" for i in range(1, 21)]
-    image_order.extend(names)
-    image_order.extend(["water"])
+    # image_order = ["BO1-50", "BO1-40", "BO1-30", "BO1-20", "water"]
     
     
-    # LINN
-    nrrd_base = "./Linn_Reclaimed-Timber"
-    filename = "Linn-Exjobb_3.nrrd"
+    # # EXTRA
+    # nrrd_base = "./Jan-NDT-CT/Extra"
+    # filename = "Jan_Msc_Extra.nrrd"
     
-    image_order = ["inre", "undre", "stora", "waer"]
+    # image_order = ["SE1-50", "SE2-50", "SE1-40", "SE2-40", "OE1-40", "SE1-30", "SE2-30", "OE1-30", "OE1-50", "OE2-50"]
+    # names = [f"BE{i:01d}-20" for i in range(1, 21)]
+    # image_order.extend(names)
+    # image_order.extend(["water"])
+    
+    
+    # # LINN
+    # nrrd_base = "./Linn_Reclaimed-Timber"
+    # filename = "Linn-Exjobb_3.nrrd"
+    
+    # image_order = ["inre", "undre", "stora", "waer"]
     
         
-    # SCHNEPPS
-    nrrd_base = "./Schnepps_Knots/pieces"
-    filename = "Doka_Julian_MSc-pieces.nrrd"
+    # # SCHNEPPS
+    # nrrd_base = "./Schnepps_Knots/pieces"
+    # filename = "Doka_Julian_MSc-pieces.nrrd"
     
-    image_order = []
-    names = [f"A{i:01d}" for i in range(1, 7)]
-    image_order.extend(names)
-    names = [f"B{i:01d}" for i in range(1, 5)]
-    image_order.extend(names)
-    names = [f"C{i:01d}" for i in range(1, 6)]
-    image_order.extend(names)
-    names = ["D2","D1","water"]
-    image_order.extend(names)
-    
-    
-    nrrd_base = "./Schnepps_Knots/B"
-    filename = "Doka_Julian_MSc-B.nrrd"
-    
-    image_order = []
-    names = [f"B{i:01d}" for i in range(1, 6)]
+    # image_order = []
+    # names = [f"A{i:01d}" for i in range(1, 7)]
+    # image_order.extend(names)
+    # names = [f"B{i:01d}" for i in range(1, 5)]
+    # image_order.extend(names)
+    # names = [f"C{i:01d}" for i in range(1, 6)]
+    # image_order.extend(names)
+    # names = ["D2","D1","water"]
+    # image_order.extend(names)
     
     
+    # nrrd_base = "./Schnepps_Knots/B"
+    # filename = "Doka_Julian_MSc-B.nrrd"
     
-    filenames.append(filename)
-    image_orders.append(image_order)
+    # image_order = []
+    # names = [f"B{i:01d}" for i in range(1, 6)]
+    
+    
+    
+    # filenames.append(filename)
+    # image_orders.append(image_order)
     
     for i in range(len(filenames)):
         filename = filenames[i]
         image_order = image_orders[i]
 
-        # RAW specific:
-        if raw_project:
-            scan_name = filename.split(".")[2]
-            batch_name = scan_name[0]
-            nrrd_file = os.path.join(nrrd_base, filename)
-            output_dir = os.path.join(nrrd_base, scan_name)
-            labels_pic = [f"{batch_name}{num}" for num in image_order]
-            setup_logging(nrrd_base,base_name=scan_name)
-        else:
-            scan_name = os.path.split(filename)[-1].split(".")[0]
-            nrrd_file = os.path.join(nrrd_base, filename)
-            output_dir = nrrd_base
-            labels_pic = image_order
-            setup_logging(nrrd_base,base_name=scan_name)
+        scan_name = os.path.split(filename)[-1].split(".")[0]
+        nrrd_file = os.path.join(nrrd_base, filename)
+        output_dir = nrrd_base
+        labels_pic = image_order
+        setup_logging(nrrd_base,base_name=scan_name)
+
 
         # Pipeline
         logging.info(f"Loading {nrrd_file}...")
@@ -383,7 +388,71 @@ def main():
         save_label_nrrd(label_img, header, os.path.join(output_dir, f"{scan_name}_labels.nrrd"))
         extract_and_save_components(label_img, img_dip, output_dir, header, labels_pic=labels_pic, margin_mm=margin_mm, postol_mm=postol_mm, size_hint_mm_inf=size_hint_mm_inf, size_hint_mm_sup=size_hint_mm_sup)
     
+    
+def process_RAW(nrrd_base,filename,image_order,margin_mm,postol_mm,size_hint_mm_inf,size_hint_mm_sup):
+# def process_RAW(args):  # argument unpacking for parallelisation
+#     nrrd_base, filename, image_order, margin_mm, postol_mm, size_hint_mm_inf, size_hint_mm_sup = args
+    
+    scan_name = filename.stem.split(".")[0]
+    batch_name = scan_name[0]
+    nrrd_file = filename.as_posix()
+    output_dir = (Path(nrrd_base) / scan_name).as_posix()
+    
+    labels_pic = [f"{batch_name}{num}" for num in image_order]
+    setup_logging(output_dir,base_name=scan_name)
+    
+    logging.info(f"Loading {nrrd_file}...")
+    img_dip, header = load_nrrd_as_dip(nrrd_file)
+    dx, dy, dz = header["spacings"]
+    label_img = segment_objects(img_dip, dx)
+    save_label_nrrd(label_img, header, os.path.join(output_dir, f"{scan_name}_labels.nrrd"))
+    extract_and_save_components(label_img, img_dip, output_dir, header, 
+                                labels_pic=labels_pic, margin_mm=margin_mm, postol_mm=postol_mm, 
+                                size_hint_mm_inf=size_hint_mm_inf, size_hint_mm_sup=size_hint_mm_sup)
+    
 
+
+def process_RAW_parallel(nrrd_base, nr_threads=8, filenames=None):
+    # Input
+    margin_mm = 5  # mm  
+    size_hint_mm_inf = [700,20,20] # Z, Y, X
+    size_hint_mm_sup = None
+    postol_mm = [100,30,30]
+    
+    # Extract prefix letter from base path (e.g., "./K" → "K")
+    prefix_letter = Path(nrrd_base).name.strip("./")
+
+    arglist = []
+    
+    for fn in filenames:
+        # Extract the base name (e.g., J_01-02.nrrd → 01-02)
+        pattern = rf'{prefix_letter}_(\d{{1,3}})-(\d{{1,3}})\.nrrd'
+        match = re.search(pattern, fn.name)
+        
+        image_order = []
+        if match:
+            from_to = [int(match.group(1)), int(match.group(2))]
+            image_ids = range(from_to[0],from_to[-1]+1)
+            image_order = [f"{n:03d}" for n in image_ids]   # 3 leading 0s
+        
+        args = (nrrd_base,fn,image_order,
+                margin_mm,postol_mm,
+                size_hint_mm_inf,size_hint_mm_sup)
+        arglist.append(args)
+    
+    with Pool(processes=nr_threads) as pool:
+        # pool.map(process_RAW, arglist)
+        pool.starmap(process_RAW, arglist) # automatically unpacks each tuple in arglist into positional arguments
+
+
+
+def main():
+    nr_threads = 6
+    nrrd_base = "./N"
+    filenames = sorted(list(Path(nrrd_base).glob('*.nrrd')))
+    # filenames = [Path(nrrd_base) / "K_19-20.nrrd"]
+    process_RAW_parallel(nrrd_base,nr_threads,filenames)
 
 if __name__ == "__main__":
     main()
+    
