@@ -1,4 +1,7 @@
-/RAW
-/Linn-exjobb
-Linn
 .gitignore
+Jan-NDT-CT
+Linn_Reclaimed-Timber
+Schnepps_Knots
+RAW
+*.nrrd
+*.log

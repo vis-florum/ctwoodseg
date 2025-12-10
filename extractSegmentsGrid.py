@@ -117,59 +117,6 @@ def save_label_nrrd(label_img, header, out_path):
     nrrd.write(out_path, label_array, header=label_header, compression_level=1)
     
 
-def cluster_axis(coords_singleaxis, tolerance):
-    """Clusters 1D coordinates using DBSCAN, returns group labels for each input."""
-    coords_singleaxis = np.array(coords_singleaxis).reshape(-1, 1)
-    # DBSCAN eps = tolerance, min_samples=1 means even isolated points get a label
-    labels = DBSCAN(eps=tolerance, min_samples=1, metric='euclidean').fit_predict(coords_singleaxis)
-    return labels
-
-
-def cluster_and_sort_labels(label_positions, valid_labels, postol_px):
-    """
-    Groups objects using 1D DBSCAN in Z and Y, sorts by Z group (asc), Y group (desc), X (asc).
-    cc_px: [X, Y, Z] center-to-center pixel estimates.
-    """
-    # Gather mid-point coordinates
-    mid_zs = np.array([label_positions[k]["mid_z"] for k in valid_labels])
-    mid_ys = np.array([label_positions[k]["mid_y"] for k in valid_labels])
-    mid_xs = np.array([label_positions[k]["mid_x"] for k in valid_labels])
-
-    # Compute grouping tolerance (half of estimated spacing)
-    z_tolerance_px = postol_px[2]
-    y_tolerance_px = postol_px[1]
-
-    # Cluster using DBSCAN
-    z_groups = cluster_axis(mid_zs, z_tolerance_px)
-    y_groups = cluster_axis(mid_ys, y_tolerance_px)
-
-    # Map group -> first mid_z
-    group_to_first_mid_z = {}
-    for group in set(z_groups):
-        idxs = np.where(z_groups == group)[0]
-        # Use the first sample's mid_z
-        first_idx = idxs[0]
-        group_to_first_mid_z[group] = mid_zs[first_idx]
-
-    # Sort group labels by ascending mid_z of first sample
-    sorted_groups = sorted(group_to_first_mid_z, key=lambda g: group_to_first_mid_z[g])
-
-    # Build group info: (z_group, y)
-    group_info = {k: (z_groups[idx], label_positions[k]["mid_y"]) for idx, k in enumerate(valid_labels)}
-
-    # Output: for each group in sorted order, output its members sorted by Y descending
-    sorted_labels = []
-    for z_group in sorted_groups:
-        labels_in_z = [k for idx, k in enumerate(valid_labels) if z_groups[idx] == z_group]
-        labels_in_z_sorted = sorted(labels_in_z, key=lambda k: group_info[k][1], reverse=True)
-        sorted_labels.extend(labels_in_z_sorted)
-    
-    return sorted_labels
-
-import numpy as np
-
-
-
 
 def _bin_axis(vals, n_bins, offset_steps=25):
     """
@@ -240,11 +187,7 @@ def cluster_and_sort_labels_known_bins(label_positions, valid_labels,
 
 
 
-def extract_and_save_components(
-        label_img, img_dip, output_dir, header, bins=(1,1,1), 
-        labels_in_order=None, margin_mm=5, postol_mm=None, 
-        size_hint_mm_inf=None, size_hint_mm_sup=None):
-    
+def extract_and_save_components(label_img, img_dip, output_dir, header, bins=(1,1,1), labels_in_order=None, margin_mm=5, postol_mm=None, size_hint_mm_inf=None, size_hint_mm_sup=None):
     os.makedirs(output_dir, exist_ok=True)
 
     dx, dy, dz = header["spacings"]
@@ -289,15 +232,10 @@ def extract_and_save_components(
             upper.append(hi)
 
         # Skip if size does not meet requirements
-        # size_hint_dip_inf = size_hint_px_inf[::-1]
-        # size_hint_dip_sup = size_hint_px_sup[::-1]
         if any(extent[d] < size_hint_px_inf[d] for d in range(3)):
             logging.info(f"Skipping label {k} due to undersize: {extent[::-1]}  (X, Y, Z), infemum is: {size_hint_px_inf[::-1]}")
             print(f"Skipping label {k} due to undersize: {extent[::-1]}  (X, Y, Z), infemum is: {size_hint_px_inf[::-1]}")
             continue
-        # if extent[1] > size_hint_dip[1] * 4 or extent[2] > size_hint_dip[2] * 4:
-        #     logging.info(f"Skipping label {k} due to size: {extent[::-1]} (X, Y, Z)")
-        #     continue
         if any(extent[d] > size_hint_px_sup[d] for d in range(3)):
             logging.info(f"Skipping label {k} due to oversize: {extent[::-1]} (X, Y, Z), supremum is: {size_hint_px_sup[::-1]}")
             print(f"Skipping label {k} due to oversize: {extent[::-1]} (X, Y, Z), supremum is: {size_hint_px_sup[::-1]}")
@@ -317,7 +255,6 @@ def extract_and_save_components(
         # Binning / Clustering of the objects
         logging.info(f"Clustering {len(valid_labels)} objects...")
         postol_px = [int(postol_mm[d] // dx) for d in range(3)]
-        # final_label_order = cluster_and_sort_labels(label_positions, valid_labels, postol_px)
         final_label_order = cluster_and_sort_labels_known_bins(label_positions, valid_labels, bins)
         
         # Save label order as CSV
@@ -377,8 +314,7 @@ def extract_and_save_components(
 
             cropped_header = header.copy()
             cropped_header['sizes'] = np.array(cropped.Sizes())
-            # cropped_header["encoding"] = "raw"
-            #
+
             logging.info(f"Saving {out_path}...")
             nrrd.write(out_path, np.asarray(cropped), header=cropped_header, compression_level=1)
             logging.info(f"Saved: {out_path}")
@@ -388,115 +324,7 @@ def extract_and_save_components(
 
 ###############################################################################################
 
-def process_general():
-    # Input
-    margin_mm = 20  # mm
-    filenames = []
-    image_orders = []
-    size_hint_mm_inf = [1500,90,90] # Z, Y, X
-    size_hint_mm_sup = None
-    postol_mm = [100,100,100]
-    
-    nrrd_base = ""
-    
-    # size_hint_mm_inf = None
-    # size_hint_mm_sup = None
-    # postol_mm = [100,100,15]
-    
-    # nrrd_base = "./Jan-NDT-CT/Spruce"
-    # filename = "Jan_Msc_Spruce.nrrd"
-    # prefix = "S"
-    
-    # nrrd_base = "./Jan-NDT-CT/Oak"
-    # filename = "Jan_Msc_Oak.nrrd"
-    # prefix = "O"
-    
-    # nrrd_base = "./Jan-NDT-CT/Beech"
-    # filename = "Jan_Msc_Beech.nrrd"
-    # prefix = "B"
-
-    # # Naming convention: S1-{size_nom}, S2-{size_nom}, ...
-    # image_order = []
-    # for size_nom in [50, 40, 30, 20]:
-    #     names = [f"{prefix}{i:01d}-{str(size_nom)}" for i in range(1, 9)]
-    #     image_order.extend(names)
-    # image_order.append("water")
-    
-    
-    # # Blackoak
-    # nrrd_base = "./Jan-NDT-CT/Blackoak"
-    # filename = "Jan_Msc_Blackoak.nrrd"
-    
-    # image_order = ["BO1-50", "BO1-40", "BO1-30", "BO1-20", "water"]
-    
-    
-    # # EXTRA
-    # nrrd_base = "./Jan-NDT-CT/Extra"
-    # filename = "Jan_Msc_Extra.nrrd"
-    
-    # image_order = ["SE1-50", "SE2-50", "SE1-40", "SE2-40", "OE1-40", "SE1-30", "SE2-30", "OE1-30", "OE1-50", "OE2-50"]
-    # names = [f"BE{i:01d}-20" for i in range(1, 21)]
-    # image_order.extend(names)
-    # image_order.extend(["water"])
-    
-    
-    # # LINN
-    # nrrd_base = "./Linn_Reclaimed-Timber"
-    # filename = "Linn-Exjobb_3.nrrd"
-    
-    # image_order = ["inre", "undre", "stora", "waer"]
-    
-        
-    # # SCHNEPPS
-    # nrrd_base = "./Schnepps_Knots/pieces"
-    # filename = "Doka_Julian_MSc-pieces.nrrd"
-    
-    # image_order = []
-    # names = [f"A{i:01d}" for i in range(1, 7)]
-    # image_order.extend(names)
-    # names = [f"B{i:01d}" for i in range(1, 5)]
-    # image_order.extend(names)
-    # names = [f"C{i:01d}" for i in range(1, 6)]
-    # image_order.extend(names)
-    # names = ["D2","D1","water"]
-    # image_order.extend(names)
-    
-    
-    # nrrd_base = "./Schnepps_Knots/B"
-    # filename = "Doka_Julian_MSc-B.nrrd"
-    
-    # image_order = []
-    # names = [f"B{i:01d}" for i in range(1, 6)]
-    
-    
-    
-    # filenames.append(filename)
-    # image_orders.append(image_order)
-    
-    for i in range(len(filenames)):
-        filename = filenames[i]
-        image_order = image_orders[i]
-
-        scan_name = os.path.split(filename)[-1].split(".")[0]
-        nrrd_file = os.path.join(nrrd_base, filename)
-        output_dir = nrrd_base
-        labels_in_order = image_order
-        setup_logging(nrrd_base,base_name=scan_name)
-
-
-        # Pipeline
-        logging.info(f"Loading {nrrd_file}...")
-        img_dip, header = load_nrrd_as_dip(nrrd_file)
-        dx, dy, dz = header["spacings"]
-        label_img = segment_objects(img_dip, dx)
-        save_label_nrrd(label_img, header, os.path.join(output_dir, f"{scan_name}_labels.nrrd"))
-        extract_and_save_components(label_img, img_dip, output_dir, header, labels_in_order=labels_in_order, margin_mm=margin_mm, postol_mm=postol_mm, size_hint_mm_inf=size_hint_mm_inf, size_hint_mm_sup=size_hint_mm_sup)
-    
-    
-def process_RAW(nrrd_base,filename,labels_in_order,margin_mm,bins,postol_mm,size_hint_mm_inf,size_hint_mm_sup):
-# def process_RAW(args):  # argument unpacking for parallelisation
-#     nrrd_base, filename, margin_mm, postol_mm, size_hint_mm_inf, size_hint_mm_sup = args
-    
+def process_RAW(nrrd_base,filename,labels_in_order,margin_mm,bins,postol_mm,size_hint_mm_inf,size_hint_mm_sup):   
     scan_name = filename.stem.split(".")[0]
     nrrd_file = filename.as_posix()
     output_dir = (Path(nrrd_base) / scan_name).as_posix()
@@ -507,7 +335,7 @@ def process_RAW(nrrd_base,filename,labels_in_order,margin_mm,bins,postol_mm,size
     img_dip, header = load_nrrd_as_dip(nrrd_file)
     dx, dy, dz = header["spacings"]
     label_img = segment_objects(img_dip, dx)
-    # save_label_nrrd(label_img, header, os.path.join(output_dir, f"{scan_name}_labels.nrrd"))
+    save_label_nrrd(label_img, header, os.path.join(output_dir, f"{scan_name}_labels.nrrd"))
     extract_and_save_components(label_img, img_dip, output_dir, header, bins=bins,
                                 labels_in_order=labels_in_order, margin_mm=margin_mm, postol_mm=postol_mm, 
                                 size_hint_mm_inf=size_hint_mm_inf, size_hint_mm_sup=size_hint_mm_sup)
@@ -549,7 +377,6 @@ def process_RAW_parallel(nrrd_base, nr_threads=8, filenames=None, anonymous=Fals
         arglist.append(args)
     
     with Pool(processes=nr_threads) as pool:
-        # pool.map(process_RAW, arglist)
         pool.starmap(process_RAW, arglist) # automatically unpacks each tuple in arglist into positional arguments
 
 
@@ -564,6 +391,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# TODO:
-# Chekck order of G 4-9!!
