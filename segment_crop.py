@@ -37,12 +37,6 @@ def setup_logging(log_dir, base_name="extract_pipeline"):
     logging.info(f" New logging session started at {timestamp} ")
     logging.info(f"Logging started. Output will be written to {log_path}")
     logging.info("=" * 60 + "\n")
-    
-
-def load_nrrd_as_dip(filename):
-    data, header = nrrd.read(filename)
-    img_dip = dip.Image(data)
-    return img_dip, header
 
 
 def segment_objects(img_dip, px_scale, t=200):
@@ -347,13 +341,13 @@ def process_RAW(filename, labels_in_order, bins, t,
                 margin_mm,postol_mm,size_hint_mm_inf):
     
     output_path = filename.parent / filename.stem
-    nrrd_file = filename.name
-    label_file = filename.parent / filename.stem + "_labels.nrrd"
+    label_file = filename.parent / (filename.stem + "_labels.nrrd")
     
     setup_logging(output_path,base_name=filename.stem)
     
-    logging.info(f"Loading {nrrd_file}...")
-    img_dip, header = load_nrrd_as_dip(nrrd_file)
+    logging.info(f"Loading {filename}...")
+    data, header = nrrd.read(filename.as_posix())
+    img_dip = dip.Image(data)
     dx, dy, dz = header["spacings"]
 
     labelled_img = segment_objects(img_dip, dx, t)
@@ -365,10 +359,10 @@ def process_RAW(filename, labels_in_order, bins, t,
                                 size_hint_mm_inf=size_hint_mm_inf, size_hint_mm_sup=None)
     
 
-def parse_nrrd_objects(fn):
+def parse_nrrd_objects(fn_str:str):
     # Pattern: One or more groups like A_01-03
     pattern = r'([A-Z])_(\d{1,3})-(\d{1,3})'
-    matches = re.findall(pattern, fn.name)
+    matches = re.findall(pattern,fn_str)
     labels_in_order = []
     
     for letter, start, end in matches:
@@ -391,26 +385,27 @@ def process_RAW_parallel(filenames, bins, t, margin_mm,
             for id in range(len(labels_in_order)):
                 labels_in_order[id] = f"{id:03d}"
         
-        args = (fn,labels_in_order, bins, t, margin_mm,
+        args = (fn, labels_in_order, bins, t, margin_mm,
                 postol_mm,size_hint_mm_inf)
         arglist.append(args)
+        process_RAW(fn, labels_in_order, bins, t, margin_mm,
+                postol_mm,size_hint_mm_inf)
     
-    with Pool(processes=nr_threads) as pool:
-        pool.starmap(process_RAW, arglist) # unpack positional args
-
+    # with Pool(processes=nr_threads) as pool:
+    #     pool.starmap(process_RAW, arglist) # unpack positional args
 
 
 def main():
     margin_mm = 20  # mm  
 
-    nrrd_base = Path("./G")
+    nrrd_base = Path("./test")
     # filenames = sorted(list(nrrd_base.glob('*.nrrd')))
     nr_threads = 4
     size_hint_mm_inf = [700,35,35] # Z, Y, X
     postol_mm = [100,50,30]
     bins = (1,1,1) # Z, Y, X
     
-    filenames = nrrd_base / "G_04-06.nrrd"
+    filenames = [nrrd_base / "G_04-06.nrrd"]
     anonymous=False
     t = 200
 
