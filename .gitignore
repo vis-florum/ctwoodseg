@@ -1,7 +1,16 @@
-.gitignore
-Jan-NDT-CT
-Linn_Reclaimed-Timber
-Schnepps_Knots
+# Directories
+data
 RAW
+
+# Directory types
+*.egg-info
+
+# Files types
 *.nrrd
 *.log
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.pdf
+*.pyc

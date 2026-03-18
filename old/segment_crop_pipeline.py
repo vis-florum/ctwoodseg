@@ -1,42 +1,45 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import logging
+import os
+import sys
+import re
+
+from sklearn.cluster import DBSCAN
+from datetime import datetime
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Iterable, Sequence
+
 import nrrd
 import diplib as dip
 import numpy as np
-from sklearn.cluster import DBSCAN
-import os
-import re
-from pathlib import Path
-import logging
-from datetime import datetime
-import re
-from collections import defaultdict
-import matplotlib.pyplot as plt
+
 from multiprocessing import Pool, cpu_count
 
+# --------------------------------------------------------------------------------------
+# Logging
+# --------------------------------------------------------------------------------------
 
-def setup_logging(log_dir, base_name="extract_pipeline"):
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
+def setup_logging(log_dir: Path, base_name: str = "extract_pipeline") -> None:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{base_name}.log"
 
-    # timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    # log_path = os.path.join(log_dir, f"{base_name}_{timestamp}.log")
-    log_path = os.path.join(log_dir, f"{base_name}.log")
-
-    # Remove all existing handlers
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
 
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s",
-        handlers=[logging.FileHandler(log_path, mode="a")]
+        handlers=[logging.FileHandler(log_path, mode="a"), logging.StreamHandler(sys.stdout)],
     )
+    logging.info("=" * 70)
+    logging.info("New logging session")
+    logging.info("Log file: %s", log_path)
+    logging.info("=" * 70)
 
-    # Add new session banner to log
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    logging.info("\n\n" + "=" * 60)
-    logging.info(f" New logging session started at {timestamp} ")
-    logging.info(f"Logging started. Output will be written to {log_path}")
-    logging.info("=" * 60 + "\n")
 
 
 def segment_objects(img_dip, px_scale, t=200):
@@ -159,13 +162,49 @@ def _bin_axis(vals, n_bins, offset_steps=25):
     k = np.clip(k, 0, n_bins - 1).astype(int)
     return k, p0, best_off
 
-def cluster_and_sort_labels_known_bins(label_positions, valid_labels,
-                                       bins=(1, 1, 1)):
+def create_sort_spec(primary_axis, secondary_axis, tertiary_axis,
+                    primary_asc=True, secondary_asc=False, tertiary_asc=True):
     """
-    bins=(nx, ny, nz). Sort by: Z bin asc, then Y bin desc, then X asc.
-    If a dimension has 1 bin, fall back to raw coordinate for that dimension as tiebreak.
+    Create a sort specification for object labeling.
+    
+    Args:
+        primary_axis, secondary_axis, tertiary_axis: 'x', 'y', or 'z'
+        XXX_asc: True for ascending, False for descending
+        
+    Returns:
+        dict: Sort specification with axes and directions
+        
+    Examples:
+        Front-to-back, bottom-to-top, left-to-right:
+            create_sort_spec('z', 'y', 'x', True, True, True)
+        Bottom-to-top (rows), left-to-right (columns), front-to-back (layers):
+            create_sort_spec('y', 'x', 'z', False, True, True)
+    """
+    return {
+        "order": [primary_axis, secondary_axis, tertiary_axis],
+        "ascending": [primary_asc, secondary_asc, tertiary_asc]
+    }
+
+
+def cluster_and_sort_labels_known_bins(label_positions, valid_labels,
+                                       bins=(1, 1, 1), sort_spec=None):
+    """
+    Cluster and sort labels according to bins and sort specification.
+    
+    Args:
+        label_positions: dict of label -> {"mid_x", "mid_y", "mid_z", ...}
+        valid_labels: list of label indices to sort
+        bins: (nx, ny, nz) number of bins per axis
+        sort_spec: dict with "order" (list of 'x','y','z') and "ascending" (list of bool)
+                   If None, defaults to Z asc, Y desc, X asc
+    
+    If a dimension has 1 bin, fall back to raw coordinate for that dimension.
     Handles holes naturally.
     """
+    if sort_spec is None:
+        sort_spec = create_sort_spec('z', 'y', 'x', 
+                                     primary_asc=True, secondary_asc=False, tertiary_asc=True)
+    
     xs = np.array([label_positions[k]["mid_x"] for k in valid_labels], float)
     ys = np.array([label_positions[k]["mid_y"] for k in valid_labels], float)
     zs = np.array([label_positions[k]["mid_z"] for k in valid_labels], float)
@@ -175,13 +214,24 @@ def cluster_and_sort_labels_known_bins(label_positions, valid_labels,
     yg, _, _ = _bin_axis(ys, ny)
     zg, _, _ = _bin_axis(zs, nz)
 
-    # Primary sort keys: Z bin asc, then Y bin desc, then X asc (raw)
-    # If nz==1 use raw Z asc to avoid randomization by tiny drift; similarly for ny
-    zkey = zg if nz > 1 else zs
-    ykey = -yg if ny > 1 else -ys   # descending
-    xkey = xs if nx > 1 else xs
+    # Map axis letter to binned and raw coords
+    axis_to_binned = {'x': xg, 'y': yg, 'z': zg}
+    axis_to_raw = {'x': xs, 'y': ys, 'z': zs}
+    axis_to_nbins = {'x': nx, 'y': ny, 'z': nz}
 
-    order = np.lexsort((xkey, ykey, zkey))  # last key has highest priority
+    # Build sort keys in reverse order (lexsort priority is right-to-left)
+    sort_keys = []
+    for axis, is_asc in zip(sort_spec["order"], sort_spec["ascending"]):
+        nbins = axis_to_nbins[axis]
+        # Use binned if multiple bins, else raw
+        key = axis_to_binned[axis] if nbins > 1 else axis_to_raw[axis]
+        # Negate for descending
+        key = key if is_asc else -key
+        sort_keys.append(key)
+    
+    # lexsort: last tuple element has highest priority
+    sort_keys.reverse()
+    order = np.lexsort(tuple(sort_keys))
     sorted_labels = [valid_labels[i] for i in order]
 
     return sorted_labels
@@ -200,7 +250,9 @@ def get_valid_labels(img_dip,labelled_img,margin_px,size_hint_px_inf,size_hint_p
     label_positions = {}
     
     for k in range(1, num_labels + 1):
-        lower = [], upper = [], extent = []
+        lower = []
+        upper = []
+        extent = []
 
         for d in range(3):  # 0 = X, 1 = Y, 2 = Z
             min_d = int(mins[k][d])
@@ -238,10 +290,70 @@ def get_valid_labels(img_dip,labelled_img,margin_px,size_hint_px_inf,size_hint_p
     return valid_labels, label_positions
 
 
+def naming_strategy_parsed(i, k, label_positions, labels_in_order=None):
+    """
+    Default naming strategy: uses parsed labels or falls back to numeric.
+    
+    Args:
+        i: 1-indexed object counter
+        k: label index from segmentation
+        label_positions: dict with label info
+        labels_in_order: list of label names (may be None)
+        
+    Returns:
+        str: base filename (without .nrrd extension)
+    """
+    lower = label_positions[k]["lower"]
+    upper = label_positions[k]["upper"]
+    extent = label_positions[k]["extent"]
+    z0, y0, x0 = lower
+    extent_x, extent_y, extent_z = extent[::-1]  # [X, Y, Z]
+    
+    if labels_in_order is not None and i - 1 < len(labels_in_order):
+        return labels_in_order[i - 1]
+    else:
+        return f"object_{i:02d}_X{x0}_Y{y0}_Z{z0}_extX{extent_x}_extY{extent_y}_extZ{extent_z}"
+
+
+def naming_strategy_sequential(i, k, label_positions, **kwargs):
+    """
+    Simple sequential naming: object_01, object_02, etc.
+    
+    Args:
+        i: 1-indexed object counter
+        k: label index from segmentation
+        label_positions: dict with label info
+        **kwargs: ignored
+        
+    Returns:
+        str: base filename (without .nrrd extension)
+    """
+    return f"object_{i:02d}"
+
+
+def naming_strategy_with_coordinates(i, k, label_positions, **kwargs):
+    """
+    Naming with coordinates: object_01_X100_Y200_Z300.
+    
+    Args:
+        i: 1-indexed object counter
+        k: label index from segmentation
+        label_positions: dict with label info
+        **kwargs: ignored
+        
+    Returns:
+        str: base filename (without .nrrd extension)
+    """
+    lower = label_positions[k]["lower"]
+    z0, y0, x0 = lower
+    return f"object_{i:02d}_X{x0}_Y{y0}_Z{z0}"
+
+
 def extract_and_save_components(
         labelled_img, img_dip, output_path, header, bins=(1,1,1), 
         labels_in_order=None, margin_mm=5, postol_mm=None, 
-        size_hint_mm_inf=None, size_hint_mm_sup=None):
+        size_hint_mm_inf=None, size_hint_mm_sup=None,
+        sort_spec=None, naming_func=None):
     
     os.makedirs(output_path, exist_ok=True)
 
@@ -258,15 +370,18 @@ def extract_and_save_components(
         size_hint_px_sup = [int(size_hint_mm_sup[d] // dx) for d in range(3)]
     
 
-    valid_labels, label_positions = get_valid_labels(img_dip,labelled_img,margin_px,size_hint_mm_inf,size_hint_px_inf)
+    valid_labels, label_positions = get_valid_labels(img_dip,labelled_img,margin_px,size_hint_px_inf,size_hint_px_sup)
 
 
+    if naming_func is None:
+        naming_func = naming_strategy_parsed
+    
     if len(valid_labels) > 0:
         # Binning / Clustering of the objects
         logging.info(f"Clustering {len(valid_labels)} objects...")
         # postol_px = [int(postol_mm[d] // dx) for d in range(3)]
         # final_label_order = cluster_and_sort_labels(label_positions, valid_labels, postol_px)
-        final_label_order = cluster_and_sort_labels_known_bins(label_positions, valid_labels, bins)
+        final_label_order = cluster_and_sort_labels_known_bins(label_positions, valid_labels, bins, sort_spec=sort_spec)
         
         # Save label order as CSV
         label_order_path = os.path.join(output_path, "label_order.csv")
@@ -298,30 +413,15 @@ def extract_and_save_components(
             other_labels_mask = (label_cropped != 0) & (label_cropped != k)
             other_labels_mask = dip.Dilation(other_labels_mask, dip.SE(1))
              # set to 0 where other labels are present
-            cropped[other_labels_mask] = 0
+            # cropped[other_labels_mask] = 0
             
             # label_cropped = dip.IfThenElse(other_labels_mask, 0, label_cropped)
             # current_label_mask = (label_cropped == k)
             # cropped = dip.IfThenElse(current_label_mask, cropped, 0)
 
-            # Save using NRRD
-            z0, y0, x0 = lower
-            extent_x, extent_y, extent_z = extent[::-1]  # [X, Y, Z]
-            if labels_in_order is None:
-                out_path = os.path.join(
-                    output_path,
-                    f"object_{i:02d}_X{x0}_Y{y0}_Z{z0}.nrrd"
-                )
-            elif i-1 < len(labels_in_order):
-                out_path = os.path.join(
-                    output_path,
-                    labels_in_order[i-1] + ".nrrd"
-                )
-            else:
-                out_path = os.path.join(
-                    output_path,
-                    f"unknown-{i-len(labels_in_order):02d}_X{x0}_Y{y0}_Z{z0}_extX{extent_x}_extY{extent_y}_extZ{extent_z}.nrrd"
-                )
+            # Generate filename using naming strategy
+            base_name = naming_func(i, k, label_positions, labels_in_order=labels_in_order)
+            out_path = os.path.join(output_path, base_name + ".nrrd")
 
             cropped_header = header.copy()
             cropped_header['sizes'] = np.array(cropped.Sizes())
@@ -337,13 +437,27 @@ def extract_and_save_components(
 ###############################################################################################
 
     
-def process_RAW(filename, labels_in_order, bins, t,
-                margin_mm,postol_mm,size_hint_mm_inf):
+def process_file_single(filename, labels_in_order, bins, t,
+                margin_mm, postol_mm, size_hint_mm_inf,
+                sort_spec=None, naming_func=None):
+    """
+    Process a single NRRD file: segment, cluster, and extract objects.
     
+    Args:
+        filename: Path to NRRD file
+        labels_in_order: List of label names or None
+        bins: (nx, ny, nz) tuple for binning
+        t: Threshold value for segmentation
+        margin_mm: Margin around objects in mm
+        postol_mm: Position tolerance in mm (deprecated)
+        size_hint_mm_inf: Minimum size hint [Z, Y, X] in mm
+        sort_spec: Sort specification from create_sort_spec(), or None for default
+        naming_func: Naming function or None for default
+    """
     output_path = filename.parent / filename.stem
     label_file = filename.parent / (filename.stem + "_labels.nrrd")
     
-    setup_logging(output_path,base_name=filename.stem)
+    setup_logging(output_path, base_name=filename.stem)
     
     logging.info(f"Loading {filename}...")
     data, header = nrrd.read(filename.as_posix())
@@ -356,7 +470,8 @@ def process_RAW(filename, labels_in_order, bins, t,
     
     extract_and_save_components(labelled_img, img_dip, output_path, header, bins=bins,
                                 labels_in_order=labels_in_order, margin_mm=margin_mm, postol_mm=postol_mm, 
-                                size_hint_mm_inf=size_hint_mm_inf, size_hint_mm_sup=None)
+                                size_hint_mm_inf=size_hint_mm_inf, size_hint_mm_sup=None,
+                                sort_spec=sort_spec, naming_func=naming_func)
     
 
 def parse_nrrd_objects(fn_str:str):
@@ -373,10 +488,21 @@ def parse_nrrd_objects(fn_str:str):
     return labels_in_order
 
 
-def process_RAW_parallel(filenames, bins, t, margin_mm,
+def process_file_multi(filenames, bins, t, margin_mm,
                          postol_mm, size_hint_mm_inf,
-                         nr_threads=4, anonymous=False):
+                         nr_threads=4, anonymous=False,
+                         sort_spec=None, naming_func=None):
+    """
+    Process multiple NRRD files in sequence (or parallel if uncommented).
     
+    Args:
+        filenames: List of Path objects
+        bins, t, margin_mm, postol_mm, size_hint_mm_inf: See process_file_single()
+        nr_threads: Number of threads for parallel processing
+        anonymous: If True, use numeric naming instead of parsed labels
+        sort_spec: Sorting specification
+        naming_func: Naming function
+    """
     arglist = []
     
     for fn in filenames:
@@ -386,32 +512,50 @@ def process_RAW_parallel(filenames, bins, t, margin_mm,
                 labels_in_order[id] = f"{id:03d}"
         
         args = (fn, labels_in_order, bins, t, margin_mm,
-                postol_mm,size_hint_mm_inf)
+                postol_mm, size_hint_mm_inf, sort_spec, naming_func)
         arglist.append(args)
-        process_RAW(fn, labels_in_order, bins, t, margin_mm,
-                postol_mm,size_hint_mm_inf)
+        process_file_single(fn, labels_in_order, bins, t, margin_mm,
+                    postol_mm, size_hint_mm_inf, 
+                    sort_spec=sort_spec, naming_func=naming_func)
     
     # with Pool(processes=nr_threads) as pool:
-    #     pool.starmap(process_RAW, arglist) # unpack positional args
+    #     pool.starmap(process_file_single, arglist) # unpack positional args
 
 
 def main():
-    margin_mm = 20  # mm  
+    margin_mm = 5  # mm  
 
-    nrrd_base = Path("./test")
+    nrrd_base = Path("/media/Store-HDD/johannes-data/CT-Data/Aalborg-reclaimed")
     # filenames = sorted(list(nrrd_base.glob('*.nrrd')))
+    
+    filenames = [nrrd_base / "20260309.134740.RB_1.nrrd"]
     nr_threads = 4
-    size_hint_mm_inf = [700,35,35] # Z, Y, X
-    postol_mm = [100,50,30]
+    size_hint_mm_inf = [1900,40,40] # Z, Y, X
+    postol_mm = [100,15,15]
     bins = (1,1,1) # Z, Y, X
     
-    filenames = [nrrd_base / "G_04-06.nrrd"]
+    
     anonymous=False
     t = 200
 
-    process_RAW_parallel(filenames,bins,t,margin_mm,
-                         postol_mm,size_hint_mm_inf,
-                         nr_threads,anonymous=anonymous)
+    # Configure sorting and naming strategies
+    # Example 1: Default sorting (Z asc, Y desc, X asc) with parsed labels
+    sort_spec = create_sort_spec('y', 'x', 'z', 
+                                 primary_asc=False, secondary_asc=True, tertiary_asc=True)
+    naming_func = naming_strategy_parsed
+    
+    # Example 2: Left-to-right, bottom-to-top, front-to-back with sequential names
+    # sort_spec = create_sort_spec('x', 'y', 'z', 
+    #                              primary_asc=True, secondary_asc=False, tertiary_asc=True)
+    # naming_func = naming_strategy_sequential
+    
+    # Example 3: Custom coordinate naming
+    # naming_func = naming_strategy_with_coordinates
+
+    process_file_multi(filenames, bins, t, margin_mm,
+                         postol_mm, size_hint_mm_inf,
+                         nr_threads, anonymous=anonymous,
+                         sort_spec=sort_spec, naming_func=naming_func)
 
 if __name__ == "__main__":
     main()
